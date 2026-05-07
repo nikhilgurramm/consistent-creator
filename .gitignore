@@ -1,0 +1,4 @@
+node_modules/
+recordings/
+.tmp/
+.DS_Store
