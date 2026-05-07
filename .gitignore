@@ -3,3 +3,8 @@ recordings/
 .tmp/
 .DS_Store
 .vercel
+
+impeccable/
+server.js
+package.json
+package-lock.json
