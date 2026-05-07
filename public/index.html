@@ -19,10 +19,12 @@
       <h1 class="gate-title">Consistent Creator</h1>
       <p class="gate-subtitle">Record, enhance, and export studio-quality video directly from your browser.</p>
       <form class="gate-form" id="gateForm">
-        <input type="email" class="gate-input" id="gateEmail" placeholder="you@email.com" required autocomplete="email">
+        <input type="email" class="gate-input" id="gateEmail" placeholder="you@email.com" required autocomplete="email"
+               pattern="[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$"
+               title="Please enter a valid email address">
         <button type="submit" class="gate-btn" id="gateSubmit">Get Started</button>
       </form>
-      <p class="gate-note">Your email is only used to notify you of updates.</p>
+      <p class="gate-note">🔒 Everything runs in your browser. We don't store, access, or upload your videos — ever. Your email is only used to send product updates.</p>
     </div>
   </div>
 
@@ -143,6 +145,10 @@
       <div class="preview-wrap">
         <div class="preview-frame" id="previewFrame">
           <video id="webcamVideo" autoplay muted playsinline></video>
+          <div class="camera-loader" id="cameraLoader">
+            <div class="loader-shimmer"></div>
+            <p class="loader-text">Setting up camera...</p>
+          </div>
           <div class="badge badge-ratio" id="badgeRatio">9:16</div>
           <div class="badge badge-rec" id="recIndicator"><span class="pulse-dot"></span>REC</div>
           <div class="badge badge-pause" id="pauseIndicator">PAUSED</div>

@@ -79,17 +79,43 @@
     gateForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       const email = gateEmail.value.trim();
-      if (!email) return;
+      // Double-check email format in JS
+      const emailRegex = /^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$/;
+      if (!email || !emailRegex.test(email)) {
+        gateEmail.setCustomValidity('Please enter a valid email address');
+        gateEmail.reportValidity();
+        return;
+      }
+      gateEmail.setCustomValidity('');
 
       gateSubmit.disabled = true;
       gateSubmit.textContent = 'Starting...';
 
+      // Save to Supabase via REST API
       try {
-        if (supabase) {
-          await supabase.from('waitlist').upsert({ email }, { onConflict: 'email' });
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/waitlist`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': SUPABASE_ANON,
+            'Authorization': `Bearer ${SUPABASE_ANON}`,
+            'Prefer': 'return=minimal'
+          },
+          body: JSON.stringify({ email })
+        });
+        if (res.ok) {
+          console.log('✅ Email saved to waitlist');
+        } else {
+          const err = await res.text();
+          // 409 = duplicate, that's fine
+          if (res.status === 409 || err.includes('duplicate')) {
+            console.log('ℹ️ Email already exists');
+          } else {
+            console.warn('Supabase insert failed:', res.status, err);
+          }
         }
       } catch (err) {
-        console.warn('Supabase insert failed:', err);
+        console.warn('Supabase request failed:', err);
       }
 
       localStorage.setItem('cc_email', email);
@@ -210,19 +236,41 @@
     const vTrack = mediaStream.getVideoTracks()[0];
     if (!vTrack) return startCamera();
 
+    const cameraLoader = document.getElementById('cameraLoader');
+    const isNative16x9 = (currentRatio.w === 16 && currentRatio.h === 9);
+
+    // Show loader during ratio switch
+    if (!isNative16x9 && cameraLoader) {
+      cameraLoader.classList.remove('hidden');
+    }
+
     try {
-      await vTrack.applyConstraints(buildVideoConstraints());
-      const s = vTrack.getSettings();
-      console.log(`📹 Camera (applyConstraints): ${s.width}x${s.height} @ ${s.frameRate}fps`);
+      if (isNative16x9) {
+        // Switching to 16:9 — just go native
+        await vTrack.applyConstraints({ width: { ideal: 1920 }, height: { ideal: 1080 } });
+        const s = vTrack.getSettings();
+        console.log(`📹 Camera → 16:9: ${s.width}x${s.height}`);
+      } else {
+        // Switching to non-16:9 — reset to native first, then apply target
+        await vTrack.applyConstraints({ width: { ideal: 1920 }, height: { ideal: 1080 } });
+        await new Promise(r => setTimeout(r, 300));
+        await vTrack.applyConstraints(buildVideoConstraints());
+        const s = vTrack.getSettings();
+        console.log(`📹 Camera → ${currentRatio.label}: ${s.width}x${s.height}`);
+      }
       setStatus('Ready to record');
     } catch (err) {
       console.warn('applyConstraints failed, doing full restart:', err);
       await startCamera();
     }
+
+    // Hide loader
+    if (cameraLoader) cameraLoader.classList.add('hidden');
   }
 
   // Full camera start — only for initial setup or device changes
   async function startCamera() {
+    const cameraLoader = document.getElementById('cameraLoader');
     try {
       if (mediaStream) {
         mediaStream.getTracks().forEach(t => t.stop());
@@ -230,8 +278,19 @@
         mediaStream = null;
       }
 
+      const isNative16x9 = (currentRatio.w === 16 && currentRatio.h === 9);
+
+      // Show loader while camera settles (only for non-16:9)
+      if (!isNative16x9 && cameraLoader) {
+        cameraLoader.classList.remove('hidden');
+      }
+
+      // Always start in native 16:9 to prevent Mac camera crop
       const constraints = {
-        video: buildVideoConstraints(),
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        },
         audio: true
       };
 
@@ -245,17 +304,35 @@
       mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
       webcamVideo.srcObject = mediaStream;
 
-      // Log actual track settings
       const vTrack = mediaStream.getVideoTracks()[0];
       if (vTrack) {
         const s = vTrack.getSettings();
-        console.log(`📹 Camera: ${s.width}x${s.height} @ ${s.frameRate}fps`);
+        console.log(`📹 Camera (16:9 init): ${s.width}x${s.height} @ ${s.frameRate}fps`);
+
+        // After camera settles, apply the actual desired ratio
+        if (!isNative16x9) {
+          setTimeout(async () => {
+            try {
+              await vTrack.applyConstraints(buildVideoConstraints());
+              const s2 = vTrack.getSettings();
+              console.log(`📹 Camera (ratio applied): ${s2.width}x${s2.height} @ ${s2.frameRate}fps`);
+            } catch (e) {
+              console.warn('Ratio apply failed:', e);
+            }
+            // Hide loader with fade
+            if (cameraLoader) cameraLoader.classList.add('hidden');
+          }, 1500);
+        } else {
+          // 16:9 is native — hide loader immediately
+          if (cameraLoader) cameraLoader.classList.add('hidden');
+        }
       }
 
       setStatus('Ready to record');
     } catch (err) {
       console.error(err);
       setStatus('Camera error', 'error');
+      if (cameraLoader) cameraLoader.classList.add('hidden');
     }
   }
 
@@ -397,9 +474,16 @@
       canvasStream.addTrack(audioTracks[0]);
     }
 
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-      ? 'video/webm;codecs=vp9,opus'
-      : 'video/webm';
+    // Prefer MP4 recording (Chrome 120+), fallback to WebM
+    let mimeType;
+    if (!isLocal && MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.42E01E,mp4a.40.2')) {
+      mimeType = 'video/mp4;codecs=avc1.42E01E,mp4a.40.2';
+    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
+      mimeType = 'video/webm;codecs=vp9,opus';
+    } else {
+      mimeType = 'video/webm';
+    }
+    console.log('🎬 Recording format:', mimeType);
 
     mediaRecorder = new MediaRecorder(canvasStream, { mimeType });
 
@@ -564,60 +648,24 @@
         setStatus('Save error', 'error');
       }
     } else {
-      // ── Deployed: FFmpeg.wasm in browser ──
-      try {
-        setStatus('Loading converter...');
-        const { FFmpeg } = await import('https://esm.sh/@ffmpeg/ffmpeg@0.12.10');
-        const { fetchFile, toBlobURL } = await import('https://esm.sh/@ffmpeg/util@0.12.1');
+      // ── Deployed: direct browser download ──
+      // If recorded as MP4 (Chrome 120+), download directly. Otherwise WebM.
+      const isMP4 = recordedBlob.type.includes('mp4');
+      const ext = isMP4 ? 'mp4' : 'webm';
 
-        if (!ffmpegInstance) {
-          ffmpegInstance = new FFmpeg();
-          const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
-          await ffmpegInstance.load({
-            coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-            wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-          });
-        }
+      setStatus('Preparing download...');
+      const url = URL.createObjectURL(recordedBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${fileName}.${ext}`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
 
-        setStatus('Converting to MP4...');
-        await ffmpegInstance.writeFile('input.webm', await fetchFile(recordedBlob));
-        await ffmpegInstance.exec(['-i', 'input.webm', '-c:v', 'libx264', '-preset', 'fast', '-crf', '23', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', `${fileName}.mp4`]);
-
-        const data = await ffmpegInstance.readFile(`${fileName}.mp4`);
-        const mp4Blob = new Blob([data.buffer], { type: 'video/mp4' });
-
-        // Trigger browser download
-        const url = URL.createObjectURL(mp4Blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${fileName}.mp4`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-
-        // Clean up ffmpeg virtual FS
-        try { await ffmpegInstance.deleteFile('input.webm'); } catch {}
-        try { await ffmpegInstance.deleteFile(`${fileName}.mp4`); } catch {}
-
-        const sizeMB = (mp4Blob.size / 1024 / 1024).toFixed(1);
-        showToast(`✓ Downloaded ${fileName}.mp4 (${sizeMB} MB)`);
-        resetToRecordMode();
-      } catch (err) {
-        console.error('FFmpeg.wasm error:', err);
-        // Fallback: download as WebM
-        setStatus('MP4 failed, downloading as WebM...');
-        const url = URL.createObjectURL(recordedBlob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${fileName}.webm`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        showToast(`✓ Downloaded ${fileName}.webm (fallback)`);
-        resetToRecordMode();
-      }
+      const sizeMB = (recordedBlob.size / 1024 / 1024).toFixed(1);
+      showToast(`✓ Downloaded ${fileName}.${ext} (${sizeMB} MB)`);
+      resetToRecordMode();
     }
   });
 
