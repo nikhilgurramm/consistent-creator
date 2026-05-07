@@ -212,59 +212,60 @@
     selectedMicId = micSelect.value;
     startCamera();
   });
-
   // ── Camera ──
-  function buildVideoConstraints() {
-    const isNative16x9 = (currentRatio.w === 16 && currentRatio.h === 9);
-    const vc = {};
-    if (isNative16x9) {
-      vc.width  = { ideal: 1920 };
-      vc.height = { ideal: 1080 };
-    } else {
-      const idealW = currentRatio.w >= currentRatio.h ? 1920 : Math.round(1920 * currentRatio.w / currentRatio.h);
-      const idealH = currentRatio.h >= currentRatio.w ? 1920 : Math.round(1920 * currentRatio.h / currentRatio.w);
-      vc.width  = { ideal: idealW };
-      vc.height = { ideal: idealH };
-      vc.aspectRatio = { ideal: currentRatio.w / currentRatio.h };
-    }
-    return vc;
+  // Mac cameras only support 16:9 and 9:16 natively.
+  // For 3:4 and 1:1, we keep the camera in its current mode
+  // and let CSS object-fit:cover handle the visual crop.
+  function getCameraMode() {
+    // Portrait ratios → use 9:16 camera mode
+    if (currentRatio.h > currentRatio.w) return 'portrait';
+    // Everything else → use 16:9 camera mode
+    return 'landscape';
   }
 
-  // Apply aspect ratio change to existing live track (no camera restart)
+  // Apply aspect ratio change to existing live track
   async function applyCameraRatio() {
     if (!mediaStream) return startCamera();
     const vTrack = mediaStream.getVideoTracks()[0];
     if (!vTrack) return startCamera();
 
     const cameraLoader = document.getElementById('cameraLoader');
-    const isNative16x9 = (currentRatio.w === 16 && currentRatio.h === 9);
+    const mode = getCameraMode();
+    const s = vTrack.getSettings();
+    const currentlyPortrait = s.height > s.width;
+    const needsPortrait = mode === 'portrait';
 
-    // Show loader during ratio switch
-    if (!isNative16x9 && cameraLoader) {
-      cameraLoader.classList.remove('hidden');
-    }
+    // Show loader during every ratio switch
+    if (cameraLoader) cameraLoader.classList.remove('hidden');
 
-    try {
-      if (isNative16x9) {
-        // Switching to 16:9 — just go native
-        await vTrack.applyConstraints({ width: { ideal: 1920 }, height: { ideal: 1080 } });
-        const s = vTrack.getSettings();
-        console.log(`📹 Camera → 16:9: ${s.width}x${s.height}`);
-      } else {
-        // Switching to non-16:9 — reset to native first, then apply target
+    // Only change camera if we need to switch between landscape/portrait
+    if (needsPortrait !== currentlyPortrait) {
+      try {
+        // Reset to 16:9 first
         await vTrack.applyConstraints({ width: { ideal: 1920 }, height: { ideal: 1080 } });
         await new Promise(r => setTimeout(r, 300));
-        await vTrack.applyConstraints(buildVideoConstraints());
-        const s = vTrack.getSettings();
-        console.log(`📹 Camera → ${currentRatio.label}: ${s.width}x${s.height}`);
+
+        if (needsPortrait) {
+          // Switch to portrait
+          await vTrack.applyConstraints({
+            width: { ideal: 1080 }, height: { ideal: 1920 },
+            aspectRatio: { ideal: 9 / 16 }
+          });
+        }
+
+        const s2 = vTrack.getSettings();
+        console.log(`📹 Camera → ${mode}: ${s2.width}x${s2.height}`);
+      } catch (err) {
+        console.warn('applyConstraints failed, doing full restart:', err);
+        await startCamera();
       }
-      setStatus('Ready to record');
-    } catch (err) {
-      console.warn('applyConstraints failed, doing full restart:', err);
-      await startCamera();
+    } else {
+      // Same camera mode, just CSS changes — brief delay for visual smoothness
+      await new Promise(r => setTimeout(r, 200));
+      console.log(`📹 Camera stays ${mode}, CSS handles ${currentRatio.label} crop`);
     }
 
-    // Hide loader
+    setStatus('Ready to record');
     if (cameraLoader) cameraLoader.classList.add('hidden');
   }
 
@@ -278,10 +279,10 @@
         mediaStream = null;
       }
 
-      const isNative16x9 = (currentRatio.w === 16 && currentRatio.h === 9);
+      const needsPortrait = getCameraMode() === 'portrait';
 
-      // Show loader while camera settles (only for non-16:9)
-      if (!isNative16x9 && cameraLoader) {
+      // Show loader while camera settles
+      if (needsPortrait && cameraLoader) {
         cameraLoader.classList.remove('hidden');
       }
 
@@ -309,21 +310,22 @@
         const s = vTrack.getSettings();
         console.log(`📹 Camera (16:9 init): ${s.width}x${s.height} @ ${s.frameRate}fps`);
 
-        // After camera settles, apply the actual desired ratio
-        if (!isNative16x9) {
+        // After camera settles, switch to portrait if needed
+        if (needsPortrait) {
           setTimeout(async () => {
             try {
-              await vTrack.applyConstraints(buildVideoConstraints());
+              await vTrack.applyConstraints({
+                width: { ideal: 1080 }, height: { ideal: 1920 },
+                aspectRatio: { ideal: 9 / 16 }
+              });
               const s2 = vTrack.getSettings();
-              console.log(`📹 Camera (ratio applied): ${s2.width}x${s2.height} @ ${s2.frameRate}fps`);
+              console.log(`📹 Camera (portrait applied): ${s2.width}x${s2.height}`);
             } catch (e) {
-              console.warn('Ratio apply failed:', e);
+              console.warn('Portrait apply failed:', e);
             }
-            // Hide loader with fade
             if (cameraLoader) cameraLoader.classList.add('hidden');
           }, 1500);
         } else {
-          // 16:9 is native — hide loader immediately
           if (cameraLoader) cameraLoader.classList.add('hidden');
         }
       }
